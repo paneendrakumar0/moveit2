@@ -164,6 +164,69 @@ TEST(PlanningScene, rememberMetadataWhenAttached)
   EXPECT_EQ(scene.getObjectType(co.id), co.type) << "scene forgot specified type after attach/detach";
 }
 
+TEST(PlanningScene, rejectMismatchedSubframesInCollisionObjectAdd)
+{
+  moveit::core::RobotModelPtr robot_model(moveit::core::RobotModelBuilder("empty_robot", "base_link").build());
+  planning_scene::PlanningScene scene(robot_model);
+
+  moveit_msgs::msg::CollisionObject co;
+  co.header.frame_id = robot_model->getModelFrame();
+  co.id = "object_subframe_mismatch";
+  co.operation = moveit_msgs::msg::CollisionObject::ADD;
+  makeSphere(co);
+
+  // subframe_poses has 1 element, subframe_names is empty
+  geometry_msgs::msg::Pose subframe_pose;
+  subframe_pose.orientation.w = 1.0;
+  co.subframe_poses.push_back(subframe_pose);
+  EXPECT_FALSE(scene.processCollisionObjectMsg(co));
+  EXPECT_FALSE(scene.getWorld()->hasObject(co.id));
+
+  // Reverse mismatch: subframe_names has 1 element, subframe_poses is empty
+  co.subframe_poses.clear();
+  co.subframe_names.push_back("tip");
+  EXPECT_FALSE(scene.processCollisionObjectMsg(co));
+  EXPECT_FALSE(scene.getWorld()->hasObject(co.id));
+
+  // Matching subframes succeeds
+  co.subframe_poses.push_back(subframe_pose);
+  EXPECT_TRUE(scene.processCollisionObjectMsg(co));
+  EXPECT_TRUE(scene.getWorld()->hasObject(co.id));
+  EXPECT_TRUE(scene.knowsFrameTransform(co.id + "/tip"));
+}
+
+TEST(PlanningScene, rejectMismatchedSubframesInAttachedCollisionObject)
+{
+  moveit::core::RobotModelPtr robot_model(moveit::core::RobotModelBuilder("empty_robot", "base_link").build());
+  planning_scene::PlanningScene scene(robot_model);
+
+  moveit_msgs::msg::AttachedCollisionObject aco;
+  aco.link_name = robot_model->getModelFrame();
+  aco.object.header.frame_id = robot_model->getModelFrame();
+  aco.object.id = "attached_subframe_mismatch";
+  aco.object.operation = moveit_msgs::msg::CollisionObject::ADD;
+  makeSphere(aco.object);
+
+  // subframe_poses has 1 element, subframe_names is empty
+  geometry_msgs::msg::Pose subframe_pose;
+  subframe_pose.orientation.w = 1.0;
+  aco.object.subframe_poses.push_back(subframe_pose);
+  EXPECT_FALSE(scene.processAttachedCollisionObjectMsg(aco));
+  EXPECT_FALSE(scene.getCurrentState().hasAttachedBody(aco.object.id));
+
+  // Reverse mismatch: subframe_names has 1 element, subframe_poses is empty
+  aco.object.subframe_poses.clear();
+  aco.object.subframe_names.push_back("tool_tip");
+  EXPECT_FALSE(scene.processAttachedCollisionObjectMsg(aco));
+  EXPECT_FALSE(scene.getCurrentState().hasAttachedBody(aco.object.id));
+
+  // Matching subframes succeeds
+  aco.object.subframe_poses.push_back(subframe_pose);
+  EXPECT_TRUE(scene.processAttachedCollisionObjectMsg(aco));
+  EXPECT_TRUE(scene.getCurrentState().hasAttachedBody(aco.object.id));
+  EXPECT_TRUE(scene.knowsFrameTransform(aco.object.id + "/tool_tip"));
+}
+
 int main(int argc, char** argv)
 {
   testing::InitGoogleTest(&argc, argv);

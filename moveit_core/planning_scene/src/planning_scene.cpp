@@ -1612,6 +1612,15 @@ bool PlanningScene::processAttachedCollisionObjectMsg(const moveit_msgs::msg::At
             robot_state_.value().getGlobalLinkTransform(link_model).inverse() * world_to_header_frame;
         object_pose_in_link = link_to_header_frame * header_frame_to_object_pose;
 
+        if (object.object.subframe_poses.size() != object.object.subframe_names.size())
+        {
+          RCLCPP_ERROR(getLogger(),
+                       "Number of subframe poses (%zu) does not match number of subframe names (%zu) for object '%s'",
+                       object.object.subframe_poses.size(), object.object.subframe_names.size(),
+                       object.object.id.c_str());
+          return false;
+        }
+
         Eigen::Isometry3d subframe_pose;
         for (std::size_t i = 0; i < object.object.subframe_poses.size(); ++i)
         {
@@ -1895,6 +1904,14 @@ bool PlanningScene::processCollisionObjectAdd(const moveit_msgs::msg::CollisionO
   if (!knowsFrameTransform(object.header.frame_id))
   {
     RCLCPP_ERROR_STREAM(getLogger(), "Unknown frame: " << object.header.frame_id);
+    return false;
+  }
+
+  if (object.subframe_poses.size() != object.subframe_names.size())
+  {
+    RCLCPP_ERROR(getLogger(),
+                 "Number of subframe poses (%zu) does not match number of subframe names (%zu) for object '%s'",
+                 object.subframe_poses.size(), object.subframe_names.size(), object.id.c_str());
     return false;
   }
 
