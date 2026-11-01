@@ -164,6 +164,83 @@ TEST(PlanningScene, rememberMetadataWhenAttached)
   EXPECT_EQ(scene.getObjectType(co.id), co.type) << "scene forgot specified type after attach/detach";
 }
 
+TEST(PlanningScene, failedMoveDoesNotModifyObjectPose)
+{
+  moveit::core::RobotModelPtr robot_model(moveit::core::RobotModelBuilder("empty_robot", "base_link").build());
+  planning_scene::PlanningScene scene(robot_model);
+
+  moveit_msgs::msg::CollisionObject co;
+  co.header.frame_id = robot_model->getModelFrame();
+  co.id = "multi_shape_obj";
+  co.operation = moveit_msgs::msg::CollisionObject::ADD;
+  co.pose.position.x = 1.0;
+  co.pose.position.y = 2.0;
+  co.pose.position.z = 3.0;
+  co.pose.orientation.w = 1.0;
+
+  // Add 2 sphere primitives
+  makeSphere(co);
+  makeSphere(co);
+
+  ASSERT_TRUE(scene.processCollisionObjectMsg(co));
+  ASSERT_TRUE(scene.getWorld()->hasObject(co.id));
+  EXPECT_EQ(scene.getWorld()->getObject(co.id)->shapes_.size(), 2u);
+
+  Eigen::Isometry3d initial_object_pose = scene.getFrameTransform(co.id);
+  auto initial_shape_poses = scene.getWorld()->getObject(co.id)->shape_poses_;
+
+  // Attempt MOVE with mismatched shape poses count (1 pose instead of 2)
+  moveit_msgs::msg::CollisionObject move_co;
+  move_co.header.frame_id = robot_model->getModelFrame();
+  move_co.id = co.id;
+  move_co.operation = moveit_msgs::msg::CollisionObject::MOVE;
+  move_co.pose.position.x = 5.0;
+  move_co.pose.position.y = 6.0;
+  move_co.pose.position.z = 7.0;
+  move_co.pose.orientation.w = 1.0;
+  geometry_msgs::msg::Pose p;
+  p.orientation.w = 1.0;
+  move_co.primitive_poses.push_back(p);  // Only 1 shape pose provided
+
+  // Operation must fail
+  EXPECT_FALSE(scene.processCollisionObjectMsg(move_co));
+
+  // The global object pose and shape poses must remain unchanged
+  EXPECT_TRUE(scene.getFrameTransform(co.id).isApprox(initial_object_pose));
+  EXPECT_EQ(scene.getWorld()->getObject(co.id)->shape_poses_.size(), 2u);
+  for (std::size_t i = 0; i < initial_shape_poses.size(); ++i)
+  {
+    EXPECT_TRUE(scene.getWorld()->getObject(co.id)->shape_poses_[i].isApprox(initial_shape_poses[i]));
+  }
+
+  // Attempt MOVE with unknown header frame
+  moveit_msgs::msg::CollisionObject unknown_frame_co;
+  unknown_frame_co.header.frame_id = "nonexistent_frame";
+  unknown_frame_co.id = co.id;
+  unknown_frame_co.operation = moveit_msgs::msg::CollisionObject::MOVE;
+  unknown_frame_co.pose.position.x = 10.0;
+  unknown_frame_co.pose.orientation.w = 1.0;
+
+  EXPECT_FALSE(scene.processCollisionObjectMsg(unknown_frame_co));
+  EXPECT_TRUE(scene.getFrameTransform(co.id).isApprox(initial_object_pose));
+
+  // Valid MOVE with matching shape poses count succeeds
+  moveit_msgs::msg::CollisionObject valid_move_co;
+  valid_move_co.header.frame_id = robot_model->getModelFrame();
+  valid_move_co.id = co.id;
+  valid_move_co.operation = moveit_msgs::msg::CollisionObject::MOVE;
+  valid_move_co.pose.position.x = 8.0;
+  valid_move_co.pose.position.y = 9.0;
+  valid_move_co.pose.position.z = 10.0;
+  valid_move_co.pose.orientation.w = 1.0;
+  valid_move_co.primitive_poses.push_back(p);
+  valid_move_co.primitive_poses.push_back(p);
+
+  EXPECT_TRUE(scene.processCollisionObjectMsg(valid_move_co));
+  EXPECT_FALSE(scene.getFrameTransform(co.id).isApprox(initial_object_pose));
+  EXPECT_DOUBLE_EQ(scene.getFrameTransform(co.id).translation().x(), 8.0);
+}
+
 int main(int argc, char** argv)
 {
   testing::InitGoogleTest(&argc, argv);

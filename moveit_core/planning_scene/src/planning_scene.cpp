@@ -1960,6 +1960,29 @@ bool PlanningScene::processCollisionObjectMove(const moveit_msgs::msg::Collision
 {
   if (world_->hasObject(object.id))
   {
+    if (!knowsFrameTransform(object.header.frame_id))
+    {
+      RCLCPP_ERROR_STREAM(getLogger(), "Unknown frame: " << object.header.frame_id);
+      return false;
+    }
+
+    auto world_object = world_->getObject(object.id);  // object exists, checked earlier
+
+    // validate shape poses count before applying any modifications
+    const bool has_shape_poses =
+        !object.primitive_poses.empty() || !object.mesh_poses.empty() || !object.plane_poses.empty();
+    if (has_shape_poses)
+    {
+      std::size_t shape_size = object.primitive_poses.size() + object.mesh_poses.size() + object.plane_poses.size();
+      if (shape_size != world_object->shape_poses_.size())
+      {
+        RCLCPP_ERROR(getLogger(),
+                     "Move operation for object '%s' must have same number of geometry poses. Cannot move.",
+                     object.id.c_str());
+        return false;
+      }
+    }
+
     // update object pose
     if (!object.primitives.empty() || !object.meshes.empty() || !object.planes.empty())
     {
@@ -1976,21 +1999,11 @@ bool PlanningScene::processCollisionObjectMove(const moveit_msgs::msg::Collision
     world_->setObjectPose(object.id, object_frame_transform);
 
     // update shape poses
-    if (!object.primitive_poses.empty() || !object.mesh_poses.empty() || !object.plane_poses.empty())
+    if (has_shape_poses)
     {
-      auto world_object = world_->getObject(object.id);  // object exists, checked earlier
-
-      std::size_t shape_size = object.primitive_poses.size() + object.mesh_poses.size() + object.plane_poses.size();
-      if (shape_size != world_object->shape_poses_.size())
-      {
-        RCLCPP_ERROR(getLogger(),
-                     "Move operation for object '%s' must have same number of geometry poses. Cannot move.",
-                     object.id.c_str());
-        return false;
-      }
-
       // order matters -> primitive, mesh and plane
       EigenSTL::vector_Isometry3d shape_poses;
+      shape_poses.reserve(world_object->shape_poses_.size());
       for (const auto& shape_pose : object.primitive_poses)
       {
         shape_poses.emplace_back();
