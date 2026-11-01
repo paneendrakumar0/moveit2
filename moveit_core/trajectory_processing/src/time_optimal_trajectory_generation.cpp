@@ -925,82 +925,9 @@ bool TimeOptimalTrajectoryGeneration::computeTimeStamps(robot_trajectory::RobotT
                                                         const double max_velocity_scaling_factor,
                                                         const double max_acceleration_scaling_factor) const
 {
-  if (trajectory.empty())
-    return true;
-
-  const moveit::core::JointModelGroup* group = trajectory.getGroup();
-  if (!group)
-  {
-    RCLCPP_ERROR(getLogger(), "It looks like the planner did not set the group the plan was computed for");
-    return false;
-  }
-
-  // Validate scaling
-  double velocity_scaling_factor = verifyScalingFactor(max_velocity_scaling_factor, VELOCITY);
-  double acceleration_scaling_factor = verifyScalingFactor(max_acceleration_scaling_factor, ACCELERATION);
-
-  // Get the velocity and acceleration limits for all active joints
-  const moveit::core::RobotModel& rmodel = group->getParentModel();
-  const std::vector<std::string>& vars = group->getVariableNames();
-  std::vector<size_t> active_joint_indices;
-  if (!group->computeJointVariableIndices(group->getActiveJointModelNames(), active_joint_indices))
-  {
-    RCLCPP_ERROR(getLogger(), "Failed to get active variable indices.");
-  }
-
-  const size_t num_active_joints = active_joint_indices.size();
-  Eigen::VectorXd max_velocity(num_active_joints);
-  Eigen::VectorXd max_acceleration(num_active_joints);
-  for (size_t idx = 0; idx < num_active_joints; ++idx)
-  {
-    // For active joints only (skip mimic joints and other types)
-    const moveit::core::VariableBounds& bounds = rmodel.getVariableBounds(vars[active_joint_indices[idx]]);
-
-    // Limits need to be non-zero, otherwise we never exit
-    if (bounds.velocity_bounded_)
-    {
-      if (bounds.max_velocity_ <= 0.0)
-      {
-        RCLCPP_ERROR(getLogger(), "Invalid max_velocity %f specified for '%s', must be greater than 0.0",
-                     bounds.max_velocity_, vars[idx].c_str());
-        return false;
-      }
-      max_velocity[idx] =
-          std::min(std::fabs(bounds.max_velocity_), std::fabs(bounds.min_velocity_)) * velocity_scaling_factor;
-    }
-    else
-    {
-      RCLCPP_ERROR_STREAM(getLogger(), "No velocity limit was defined for joint " << vars[idx].c_str()
-                                                                                  << "! You have to define velocity "
-                                                                                     "limits "
-                                                                                     "in the URDF or "
-                                                                                     "joint_limits.yaml");
-      return false;
-    }
-
-    if (bounds.acceleration_bounded_)
-    {
-      if (bounds.max_acceleration_ < 0.0)
-      {
-        RCLCPP_ERROR(getLogger(), "Invalid max_acceleration %f specified for '%s', must be greater than 0.0",
-                     bounds.max_acceleration_, vars[idx].c_str());
-        return false;
-      }
-      max_acceleration[idx] = std::min(std::fabs(bounds.max_acceleration_), std::fabs(bounds.min_acceleration_)) *
-                              acceleration_scaling_factor;
-    }
-    else
-    {
-      RCLCPP_ERROR_STREAM(getLogger(), "No acceleration limit was defined for joint " << vars[idx].c_str()
-                                                                                      << "! You have to define "
-                                                                                         "acceleration "
-                                                                                         "limits in the URDF or "
-                                                                                         "joint_limits.yaml");
-      return false;
-    }
-  }
-
-  return doTimeParameterizationCalculations(trajectory, max_velocity, max_acceleration);
+  const std::unordered_map<std::string, double> empty_limits;
+  return computeTimeStamps(trajectory, empty_limits, empty_limits, max_velocity_scaling_factor,
+                           max_acceleration_scaling_factor);
 }
 
 bool TimeOptimalTrajectoryGeneration::computeTimeStamps(robot_trajectory::RobotTrajectory& trajectory,
@@ -1046,88 +973,223 @@ bool TimeOptimalTrajectoryGeneration::computeTimeStamps(
   double velocity_scaling_factor = verifyScalingFactor(max_velocity_scaling_factor, VELOCITY);
   double acceleration_scaling_factor = verifyScalingFactor(max_acceleration_scaling_factor, ACCELERATION);
 
-  // Get the velocity and acceleration limits for specified joints
+  // Get the velocity and acceleration limits for all group variables (active and mimic joints)
   const moveit::core::RobotModel& rmodel = group->getParentModel();
   const std::vector<std::string>& vars = group->getVariableNames();
-  std::vector<size_t> indices;
-  if (!group->computeJointVariableIndices(group->getActiveJointModelNames(), indices))
-  {
-    RCLCPP_ERROR(getLogger(), "Failed to get active variable indices.");
-  }
-
-  const size_t num_joints = indices.size();
+  const size_t num_joints = group->getVariableCount();
 
   Eigen::VectorXd max_velocity(num_joints);
   Eigen::VectorXd max_acceleration(num_joints);
-  for (const auto idx : indices)
+  for (size_t idx = 0; idx < num_joints; ++idx)
   {
-    const moveit::core::VariableBounds& bounds = rmodel.getVariableBounds(vars[idx]);
-
-    // VELOCITY LIMIT
-    // Check if a custom limit was specified as an argument
-    bool set_velocity_limit = false;
-    auto it = velocity_limits.find(vars[idx]);
-    if (it != velocity_limits.end())
+    const std::string& var_name = vars[idx];
+    const moveit::core::JointModel* joint_model = rmodel.getJointOfVariable(var_name);
+    if (!joint_model)
     {
-      max_velocity[idx] = it->second * velocity_scaling_factor;
-      set_velocity_limit = true;
-    }
-
-    if (bounds.velocity_bounded_ && !set_velocity_limit)
-    {
-      // Set the default velocity limit, from robot model
-      if (bounds.max_velocity_ < 0.0)
-      {
-        RCLCPP_ERROR(getLogger(), "Invalid max_velocity %f specified for '%s', must be greater than 0.0",
-                     bounds.max_velocity_, vars[idx].c_str());
-        return false;
-      }
-      max_velocity[idx] =
-          std::min(std::fabs(bounds.max_velocity_), std::fabs(bounds.min_velocity_)) * velocity_scaling_factor;
-      set_velocity_limit = true;
-    }
-
-    if (!set_velocity_limit)
-    {
-      RCLCPP_ERROR_STREAM(getLogger(), "No velocity limit was defined for joint " << vars[idx].c_str()
-                                                                                  << "! You have to define velocity "
-                                                                                     "limits "
-                                                                                     "in the URDF or "
-                                                                                     "joint_limits.yaml");
+      RCLCPP_ERROR(getLogger(), "Failed to get joint model for variable '%s'", var_name.c_str());
       return false;
     }
 
-    // ACCELERATION LIMIT
-    // Check if a custom limit was specified as an argument
-    bool set_acceleration_limit = false;
-    it = acceleration_limits.find(vars[idx]);
-    if (it != acceleration_limits.end())
-    {
-      max_acceleration[idx] = it->second * acceleration_scaling_factor;
-      set_acceleration_limit = true;
-    }
+    const moveit::core::VariableBounds& bounds = rmodel.getVariableBounds(var_name);
 
-    if (bounds.acceleration_bounded_ && !set_acceleration_limit)
+    if (joint_model->getMimic() == nullptr)
     {
-      // Set the default acceleration limit, from robot model
-      if (bounds.max_acceleration_ < 0.0)
+      // Active joint (not mimic)
+      // VELOCITY LIMIT
+      bool set_velocity_limit = false;
+      auto it = velocity_limits.find(var_name);
+      if (it == velocity_limits.end() && joint_model->getName() != var_name)
       {
-        RCLCPP_ERROR(getLogger(), "Invalid max_acceleration %f specified for '%s', must be greater than 0.0",
-                     bounds.max_acceleration_, vars[idx].c_str());
+        it = velocity_limits.find(joint_model->getName());
+      }
+      if (it != velocity_limits.end())
+      {
+        max_velocity[idx] = it->second * velocity_scaling_factor;
+        set_velocity_limit = true;
+      }
+
+      if (bounds.velocity_bounded_ && !set_velocity_limit)
+      {
+        if (bounds.max_velocity_ <= 0.0)
+        {
+          RCLCPP_ERROR(getLogger(), "Invalid max_velocity %f specified for '%s', must be greater than 0.0",
+                       bounds.max_velocity_, var_name.c_str());
+          return false;
+        }
+        max_velocity[idx] =
+            std::min(std::fabs(bounds.max_velocity_), std::fabs(bounds.min_velocity_)) * velocity_scaling_factor;
+        set_velocity_limit = true;
+      }
+
+      if (!set_velocity_limit)
+      {
+        RCLCPP_ERROR_STREAM(getLogger(), "No velocity limit was defined for joint " << var_name
+                                                                                    << "! You have to define velocity "
+                                                                                       "limits in the URDF or "
+                                                                                       "joint_limits.yaml");
         return false;
       }
-      max_acceleration[idx] = std::min(std::fabs(bounds.max_acceleration_), std::fabs(bounds.min_acceleration_)) *
-                              acceleration_scaling_factor;
-      set_acceleration_limit = true;
+
+      // ACCELERATION LIMIT
+      bool set_acceleration_limit = false;
+      it = acceleration_limits.find(var_name);
+      if (it == acceleration_limits.end() && joint_model->getName() != var_name)
+      {
+        it = acceleration_limits.find(joint_model->getName());
+      }
+      if (it != acceleration_limits.end())
+      {
+        max_acceleration[idx] = it->second * acceleration_scaling_factor;
+        set_acceleration_limit = true;
+      }
+
+      if (bounds.acceleration_bounded_ && !set_acceleration_limit)
+      {
+        if (bounds.max_acceleration_ < 0.0)
+        {
+          RCLCPP_ERROR(getLogger(), "Invalid max_acceleration %f specified for '%s', must be greater than 0.0",
+                       bounds.max_acceleration_, var_name.c_str());
+          return false;
+        }
+        max_acceleration[idx] = std::min(std::fabs(bounds.max_acceleration_), std::fabs(bounds.min_acceleration_)) *
+                                acceleration_scaling_factor;
+        set_acceleration_limit = true;
+      }
+
+      if (!set_acceleration_limit)
+      {
+        RCLCPP_ERROR_STREAM(getLogger(), "No acceleration limit was defined for joint "
+                                             << var_name
+                                             << "! You have to define "
+                                                "acceleration limits in the URDF or "
+                                                "joint_limits.yaml");
+        return false;
+      }
     }
-    if (!set_acceleration_limit)
+    else
     {
-      RCLCPP_ERROR_STREAM(getLogger(), "No acceleration limit was defined for joint " << vars[idx].c_str()
-                                                                                      << "! You have to define "
-                                                                                         "acceleration "
-                                                                                         "limits in the URDF or "
-                                                                                         "joint_limits.yaml");
-      return false;
+      // Mimic joint: determine limits from its own bounds (if specified) and/or its parent mimicked joint
+      const moveit::core::JointModel* parent_joint = joint_model->getMimic();
+      const double mimic_factor = std::fabs(joint_model->getMimicFactor());
+      const std::string& parent_var_name =
+          parent_joint->getVariableNames().empty() ? parent_joint->getName() : parent_joint->getVariableNames()[0];
+
+      // VELOCITY LIMIT FOR MIMIC JOINT
+      std::optional<double> explicit_vel_limit;
+      auto it = velocity_limits.find(var_name);
+      if (it == velocity_limits.end() && joint_model->getName() != var_name)
+      {
+        it = velocity_limits.find(joint_model->getName());
+      }
+      if (it != velocity_limits.end())
+      {
+        explicit_vel_limit = it->second;
+      }
+      else if (bounds.velocity_bounded_ && bounds.max_velocity_ > 0.0)
+      {
+        explicit_vel_limit = std::min(std::fabs(bounds.max_velocity_), std::fabs(bounds.min_velocity_));
+      }
+
+      std::optional<double> parent_vel_limit;
+      auto parent_it = velocity_limits.find(parent_var_name);
+      if (parent_it == velocity_limits.end() && parent_joint->getName() != parent_var_name)
+      {
+        parent_it = velocity_limits.find(parent_joint->getName());
+      }
+      if (parent_it != velocity_limits.end())
+      {
+        parent_vel_limit = parent_it->second;
+      }
+      else
+      {
+        const moveit::core::VariableBounds& parent_bounds = rmodel.getVariableBounds(parent_var_name);
+        if (parent_bounds.velocity_bounded_ && parent_bounds.max_velocity_ > 0.0)
+        {
+          parent_vel_limit = std::min(std::fabs(parent_bounds.max_velocity_), std::fabs(parent_bounds.min_velocity_));
+        }
+      }
+
+      if (parent_vel_limit.has_value() && mimic_factor > 0.0)
+      {
+        double parent_induced_limit = parent_vel_limit.value() * mimic_factor;
+        max_velocity[idx] =
+            (explicit_vel_limit.has_value() ? std::min(explicit_vel_limit.value(), parent_induced_limit) :
+                                              parent_induced_limit) *
+            velocity_scaling_factor;
+      }
+      else if (explicit_vel_limit.has_value())
+      {
+        max_velocity[idx] = explicit_vel_limit.value() * velocity_scaling_factor;
+      }
+      else if (mimic_factor == 0.0)
+      {
+        max_velocity[idx] = std::numeric_limits<double>::max();
+      }
+      else
+      {
+        RCLCPP_ERROR_STREAM(getLogger(), "No velocity limit was defined for mimic joint "
+                                             << var_name << " or its mimicked joint " << parent_joint->getName());
+        return false;
+      }
+
+      // ACCELERATION LIMIT FOR MIMIC JOINT
+      std::optional<double> explicit_acc_limit;
+      it = acceleration_limits.find(var_name);
+      if (it == acceleration_limits.end() && joint_model->getName() != var_name)
+      {
+        it = acceleration_limits.find(joint_model->getName());
+      }
+      if (it != acceleration_limits.end())
+      {
+        explicit_acc_limit = it->second;
+      }
+      else if (bounds.acceleration_bounded_ && bounds.max_acceleration_ >= 0.0)
+      {
+        explicit_acc_limit = std::min(std::fabs(bounds.max_acceleration_), std::fabs(bounds.min_acceleration_));
+      }
+
+      std::optional<double> parent_acc_limit;
+      parent_it = acceleration_limits.find(parent_var_name);
+      if (parent_it == acceleration_limits.end() && parent_joint->getName() != parent_var_name)
+      {
+        parent_it = acceleration_limits.find(parent_joint->getName());
+      }
+      if (parent_it != acceleration_limits.end())
+      {
+        parent_acc_limit = parent_it->second;
+      }
+      else
+      {
+        const moveit::core::VariableBounds& parent_bounds = rmodel.getVariableBounds(parent_var_name);
+        if (parent_bounds.acceleration_bounded_ && parent_bounds.max_acceleration_ >= 0.0)
+        {
+          parent_acc_limit =
+              std::min(std::fabs(parent_bounds.max_acceleration_), std::fabs(parent_bounds.min_acceleration_));
+        }
+      }
+
+      if (parent_acc_limit.has_value() && mimic_factor > 0.0)
+      {
+        double parent_induced_limit = parent_acc_limit.value() * mimic_factor;
+        max_acceleration[idx] =
+            (explicit_acc_limit.has_value() ? std::min(explicit_acc_limit.value(), parent_induced_limit) :
+                                              parent_induced_limit) *
+            acceleration_scaling_factor;
+      }
+      else if (explicit_acc_limit.has_value())
+      {
+        max_acceleration[idx] = explicit_acc_limit.value() * acceleration_scaling_factor;
+      }
+      else if (mimic_factor == 0.0)
+      {
+        max_acceleration[idx] = std::numeric_limits<double>::max();
+      }
+      else
+      {
+        RCLCPP_ERROR_STREAM(getLogger(), "No acceleration limit was defined for mimic joint "
+                                             << var_name << " or its mimicked joint " << parent_joint->getName());
+        return false;
+      }
     }
   }
 
