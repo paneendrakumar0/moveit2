@@ -458,6 +458,73 @@ TEST(World, ObjectPoseAndSubframes)
   EXPECT_EQ(1.0, pose(2, 3));  // z
 }
 
+TEST(World, CopyOnWriteMoveShapesAndSubframes)
+{
+  World world1;
+
+  shapes::ShapePtr box = std::make_shared<shapes::Box>(1, 1, 1);
+  shapes::ShapePtr cyl = std::make_shared<shapes::Cylinder>(0.5, 3);
+  std::vector<shapes::ShapeConstPtr> shapes = { box, cyl };
+
+  EigenSTL::vector_Isometry3d shape_poses = { Eigen::Isometry3d(Eigen::Translation3d(1, 0, 0)),
+                                              Eigen::Isometry3d(Eigen::Translation3d(2, 0, 0)) };
+
+  world1.addToObject("obj", shapes, shape_poses);
+
+  moveit::core::FixedTransformsMap subframes;
+  subframes["tip"] = Eigen::Isometry3d(Eigen::Translation3d(0, 0, 1));
+  world1.setSubframesOfObject("obj", subframes);
+
+  // Copy world1 to world2 (copy-on-write sharing)
+  World world2(world1);
+
+  // Initially, both worlds share the same Object instance
+  EXPECT_EQ(world1.getObject("obj"), world2.getObject("obj"));
+
+  // Test copy-on-write for moveShapesInObject:
+  EigenSTL::vector_Isometry3d new_shape_poses = { Eigen::Isometry3d(Eigen::Translation3d(10, 0, 0)),
+                                                  Eigen::Isometry3d(Eigen::Translation3d(20, 0, 0)) };
+  EXPECT_TRUE(world1.moveShapesInObject("obj", new_shape_poses));
+
+  // Objects should now be unshared
+  EXPECT_NE(world1.getObject("obj"), world2.getObject("obj"));
+
+  // world1 has updated poses
+  EXPECT_DOUBLE_EQ(10.0, world1.getObject("obj")->shape_poses_[0].translation().x());
+  EXPECT_DOUBLE_EQ(20.0, world1.getObject("obj")->shape_poses_[1].translation().x());
+  EXPECT_DOUBLE_EQ(10.0, world1.getObject("obj")->global_shape_poses_[0].translation().x());
+  EXPECT_DOUBLE_EQ(20.0, world1.getObject("obj")->global_shape_poses_[1].translation().x());
+
+  // world2 retains original poses
+  EXPECT_DOUBLE_EQ(1.0, world2.getObject("obj")->shape_poses_[0].translation().x());
+  EXPECT_DOUBLE_EQ(2.0, world2.getObject("obj")->shape_poses_[1].translation().x());
+  EXPECT_DOUBLE_EQ(1.0, world2.getObject("obj")->global_shape_poses_[0].translation().x());
+  EXPECT_DOUBLE_EQ(2.0, world2.getObject("obj")->global_shape_poses_[1].translation().x());
+
+  // Initially, both worlds share the same Object instance
+  World world3(world1);
+  EXPECT_EQ(world1.getObject("obj"), world3.getObject("obj"));
+
+  moveit::core::FixedTransformsMap new_subframes;
+  new_subframes["tip"] = Eigen::Isometry3d(Eigen::Translation3d(0, 0, 5));
+  EXPECT_TRUE(world1.setSubframesOfObject("obj", new_subframes));
+
+  // Objects should now be unshared
+  EXPECT_NE(world1.getObject("obj"), world3.getObject("obj"));
+
+  // world1 has updated subframe
+  bool found = false;
+  Eigen::Isometry3d pose1 = world1.getTransform("obj/tip", found);
+  EXPECT_TRUE(found);
+  EXPECT_DOUBLE_EQ(5.0, pose1.translation().z());
+
+  // world3 retains original subframe
+  found = false;
+  Eigen::Isometry3d pose3 = world3.getTransform("obj/tip", found);
+  EXPECT_TRUE(found);
+  EXPECT_DOUBLE_EQ(1.0, pose3.translation().z());
+}
+
 int main(int argc, char** argv)
 {
   testing::InitGoogleTest(&argc, argv);
